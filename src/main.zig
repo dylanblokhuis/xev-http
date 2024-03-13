@@ -6,13 +6,10 @@ const Allocator = std.mem.Allocator;
 
 const port = 3000;
 
-const CompletionPool = std.heap.MemoryPoolExtra(xev.Completion, .{});
-const ClientPool = std.heap.MemoryPoolExtra(Client, .{});
+const CompletionPool = std.heap.MemoryPoolExtra(xev.Completion, .{ .alignment = @alignOf(xev.Completion) });
+const ClientPool = std.heap.MemoryPoolExtra(Client, .{ .alignment = @alignOf(Client) });
 
 pub fn main() !void {
-    // const socket = try xev.TCP.init(addr);
-    // _ = socket; // autofix
-
     var thread_pool = xev.ThreadPool.init(.{});
     defer thread_pool.deinit();
     defer thread_pool.shutdown();
