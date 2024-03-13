@@ -6,8 +6,8 @@ const Allocator = std.mem.Allocator;
 
 const port = 3000;
 
-const CompletionPool = std.heap.MemoryPoolExtra(xev.Completion, .{ .alignment = @alignOf(xev.Completion) });
-const ClientPool = std.heap.MemoryPoolExtra(Client, .{ .alignment = @alignOf(Client) });
+const CompletionPool = std.heap.MemoryPoolExtra(xev.Completion, .{});
+const ClientPool = std.heap.MemoryPoolExtra(Client, .{});
 
 pub fn main() !void {
     var thread_pool = xev.ThreadPool.init(.{});
@@ -35,7 +35,6 @@ pub fn main() !void {
     var client_pool = ClientPool.init(alloc);
 
     while (true) {
-        // std.log.info("Accepting new conn", .{});
         const c = try completion_pool.create();
         const client = try client_pool.create();
 
