@@ -4,8 +4,6 @@ const xev = @import("xev");
 const net = std.net;
 const Allocator = std.mem.Allocator;
 
-const port = 3000;
-
 const CompletionPool = std.heap.MemoryPoolExtra(xev.Completion, .{});
 const ClientPool = std.heap.MemoryPoolExtra(Client, .{});
 
@@ -24,6 +22,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
+    const port = 3000;
     const addr = try net.Address.parseIp4("0.0.0.0", port);
     var socket = try xev.TCP.init(addr);
 
@@ -31,41 +30,36 @@ pub fn main() !void {
 
     try socket.bind(addr);
     try socket.listen(std.os.linux.SOMAXCONN);
+
     var completion_pool = CompletionPool.init(alloc);
+    defer completion_pool.deinit();
+
     var client_pool = ClientPool.init(alloc);
+    defer client_pool.deinit();
 
-    while (true) {
-        const c = try completion_pool.create();
-        const client = try client_pool.create();
+    const c = try completion_pool.create();
+    var server = Server{
+        .loop = &loop,
+        .gpa = alloc,
+        .completion_pool = &completion_pool,
+        .client_pool = &client_pool,
+    };
 
-        client.* = Client{
-            .loop = &loop,
-            .arena = std.heap.ArenaAllocator.init(alloc),
-            .socket = undefined,
-            .completion_pool = &completion_pool,
-            .socket_pool = &client_pool,
-        };
-        socket.accept(&loop, c, Client, client, Client.acceptCallback);
-        try loop.run(.once);
-    }
+    socket.accept(&loop, c, Server, &server, Server.acceptCallback);
+    try loop.run(.until_done);
 }
 
 const Client = struct {
+    id: u32,
+    socket: xev.TCP,
     loop: *xev.Loop,
     arena: std.heap.ArenaAllocator,
-    socket: xev.TCP = undefined,
+    client_pool: *ClientPool,
     completion_pool: *CompletionPool,
-    socket_pool: *ClientPool,
 
-    fn acceptCallback(
-        self_: ?*Client,
-        l: *xev.Loop,
-        c: *xev.Completion,
-        r: xev.TCP.AcceptError!xev.TCP,
-    ) xev.CallbackAction {
-        const self = self_.?;
-        self.socket = r catch unreachable;
+    const Self = @This();
 
+    pub fn work(self: *Self) void {
         const httpOk =
             \\HTTP/1.1 200 OK
             \\Content-Type: text/plain
@@ -79,12 +73,11 @@ const Client = struct {
             \\Hello, World! {d}
         ;
 
-        const content = std.fmt.allocPrint(self.arena.allocator(), content_str, .{0}) catch unreachable;
+        const content = std.fmt.allocPrint(self.arena.allocator(), content_str, .{self.id}) catch unreachable;
         const buf = std.fmt.allocPrint(self.arena.allocator(), httpOk, .{ content.len, content }) catch unreachable;
 
-        self.socket.write(l, c, .{ .slice = buf }, Client, self, writeCallback);
-
-        return .disarm;
+        const c_write = self.completion_pool.create() catch unreachable;
+        self.socket.write(self.loop, c_write, .{ .slice = buf }, Client, self, writeCallback);
     }
 
     fn writeCallback(
@@ -98,11 +91,8 @@ const Client = struct {
         _ = buf; // autofix
         _ = r catch unreachable;
 
-        // We do nothing for write, just put back objects into the pool.
         const self = self_.?;
-        // self.completion_pool.destroy(c);
         s.shutdown(l, c, Client, self, shutdownCallback);
-        // self.destroyBuf(buf.slice);
 
         return .disarm;
     }
@@ -135,7 +125,44 @@ const Client = struct {
         var self = self_.?;
         self.arena.deinit();
         self.completion_pool.destroy(c);
-        self.socket_pool.destroy(self);
+        self.client_pool.destroy(self);
         return .disarm;
+    }
+
+    pub fn destroy(self: *Self) void {
+        self.arena.deinit();
+        self.client_pool.destroy(self);
+    }
+};
+
+const Server = struct {
+    loop: *xev.Loop,
+    gpa: Allocator,
+    completion_pool: *CompletionPool,
+    client_pool: *ClientPool,
+    conns: u32 = 0,
+
+    fn acceptCallback(
+        self_: ?*Server,
+        l: *xev.Loop,
+        // we ignore the completion, to keep the accept loop going for new connections
+        _: *xev.Completion,
+        r: xev.TCP.AcceptError!xev.TCP,
+    ) xev.CallbackAction {
+        const self = self_.?;
+        var client = self.client_pool.create() catch unreachable;
+        client.* = Client{
+            .id = self.conns,
+            .loop = l,
+            .socket = r catch unreachable,
+            .arena = std.heap.ArenaAllocator.init(self.gpa),
+            .client_pool = self.client_pool,
+            .completion_pool = self.completion_pool,
+        };
+        client.work();
+
+        self.conns += 1;
+
+        return .rearm;
     }
 };
