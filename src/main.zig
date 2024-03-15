@@ -56,15 +56,39 @@ const Client = struct {
     arena: std.heap.ArenaAllocator,
     client_pool: *ClientPool,
     completion_pool: *CompletionPool,
+    read_buf: [4096]u8 = undefined,
 
     const Self = @This();
 
     pub fn work(self: *Self) void {
+        const c_read = self.completion_pool.create() catch unreachable;
+        self.socket.read(self.loop, c_read, .{ .slice = &self.read_buf }, Client, self, Client.readCallback);
+    }
+
+    pub fn readCallback(
+        self_: ?*Client,
+        l: *xev.Loop,
+        c: *xev.Completion,
+        s: xev.TCP,
+        buf: xev.ReadBuffer,
+        r: xev.TCP.ReadError!usize,
+    ) xev.CallbackAction {
+        const self = self_.?;
+        const n = r catch |err| {
+            std.log.err("read error {any}", .{err});
+            s.shutdown(l, c, Client, self, shutdownCallback);
+            return .disarm;
+        };
+        const data = buf.slice[0..n];
+
+        std.log.info("{s}", .{data});
+
         const httpOk =
             \\HTTP/1.1 200 OK
             \\Content-Type: text/plain
             \\Server: xev-http
             \\Content-Length: {d}
+            \\Connection: close
             \\
             \\{s}
         ;
@@ -74,10 +98,11 @@ const Client = struct {
         ;
 
         const content = std.fmt.allocPrint(self.arena.allocator(), content_str, .{self.id}) catch unreachable;
-        const buf = std.fmt.allocPrint(self.arena.allocator(), httpOk, .{ content.len, content }) catch unreachable;
+        const res = std.fmt.allocPrint(self.arena.allocator(), httpOk, .{ content.len, content }) catch unreachable;
 
-        const c_write = self.completion_pool.create() catch unreachable;
-        self.socket.write(self.loop, c_write, .{ .slice = buf }, Client, self, writeCallback);
+        self.socket.write(self.loop, c, .{ .slice = res }, Client, self, writeCallback);
+
+        return .disarm;
     }
 
     fn writeCallback(
